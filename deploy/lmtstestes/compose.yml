@@ -1,0 +1,66 @@
+# Deploy do Concursos no servidor de testes lmtstestes (sem SSH).
+#
+# Usado pelo workflow reutilizável lmtsufape/.github/.github/workflows/deploy-lmtstestes.yml,
+# que gera o .env ao lado deste arquivo a partir do secret DEPLOY_ENV_FILE do environment
+# "homologacao" e acrescenta IMAGE_TAG. A imagem é construída no GitHub Actions (GHCR).
+# Imagem base: serversideup/php (Nginx + PHP-FPM), ver Dockerfile na raiz.
+name: concursos
+
+services:
+  # Nginx + PHP-FPM no mesmo container. Sem worker de fila: as notificações são síncronas.
+  app:
+    image: ghcr.io/lmtsufape/concursos-app:${IMAGE_TAG:?IMAGE_TAG não definida}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Configuração da imagem serversideup/php (equivale ao php.ini/nginx.conf)
+      PHP_UPLOAD_MAX_FILE_SIZE: 64M
+      PHP_POST_MAX_SIZE: 64M
+      PHP_MEMORY_LIMIT: 256M
+      PHP_OPCACHE_ENABLE: "1"
+      NGINX_CLIENT_MAX_BODY_SIZE: 64M
+    ports:
+      - "30091:8080"
+    volumes:
+      - storage:/var/www/html/storage
+    networks:
+      - default
+      - mailpit
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    # Base do Debian fixada: trocar a base muda a versão de collation do glibc e exige
+    # REINDEX + ALTER DATABASE ... REFRESH COLLATION VERSION.
+    image: postgres:17-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_DATABASE:?Defina DB_DATABASE}
+      POSTGRES_USER: ${DB_USERNAME:?Defina DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Defina DB_PASSWORD}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+# Volumes external: o deploy falha em vez de criar um volume vazio por engano.
+volumes:
+  postgres:
+    name: concursos_postgres
+    external: true
+  storage:
+    name: concursos_storage
+    external: true
+
+networks:
+  default:
+    name: concursos
+  # Mailpit do servidor (stack mailpit): e-mails de verificação e notificações caem na
+  # caixa de testes em vez de sair para a internet. MAIL_HOST=mailpit, MAIL_PORT=1025.
+  mailpit:
+    name: mailpit
+    external: true
